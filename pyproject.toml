@@ -4,6 +4,7 @@ name = "genjax"
 requires-python = ">= 3.12"
 version = "1.0.13"
 dependencies = [
+    "jax>=0.7.2",
     "penzai>=0.2.5,<0.3",
     "beartype>=0.22.9,<0.23",
     "jaxtyping>=0.3.9,<0.4",
