@@ -17,6 +17,8 @@ from genjax.adev import (
     normal_reparam,
     multivariate_normal_reparam,
 )
+from genjax.distributions import normal
+from genjax.natural import normal_natural_reinforce
 from genjax.inference import (
     VariationalApproximation,
     elbo_factory,
@@ -24,6 +26,7 @@ from genjax.inference import (
     full_covariance_normal_family,
     elbo_vi,
 )
+from genjax.inference.vi import optimize_vi
 
 
 def create_simple_variational_model():
@@ -304,6 +307,89 @@ class TestCompleteVIPipeline:
         # The means should converge to approximately 1.0 each (since x1 + x2 ≈ 2.0)
         final_means = result.final_params[:2]
         assert jnp.abs(jnp.sum(final_means) - 2.0) < 0.5
+
+
+class TestFeasibilityProjection:
+    """Test the feasibility-projection hook in optimize_vi (qBBVI plumbing)."""
+
+    def test_projection_is_applied_each_step(self):
+        """A projection callback should be applied after every ascent step."""
+
+        # Fake ELBO whose gradient always pushes parameters upward.
+        class _ConstantGradElbo:
+            def grad_estimate(self, params):
+                return jnp.ones_like(params)
+
+        # Project the second coordinate to stay <= -0.5 (an infeasible-domain guard).
+        def project(params):
+            return params.at[1].set(jnp.minimum(params[1], -0.5))
+
+        result = optimize_vi(
+            _ConstantGradElbo(),
+            init_params=jnp.array([0.0, -1.0]),
+            learning_rate=1.0,
+            n_iterations=5,
+            project=project,
+        )
+
+        # Coordinate 0 is unconstrained: 0 + 5*1 = 5.
+        assert jnp.allclose(result.final_params[0], 5.0)
+        # Coordinate 1 would reach +4 without projection; clipped to -0.5 each step.
+        assert result.final_params[1] <= -0.5 + 1e-6
+        # The constraint holds throughout the recorded history.
+        assert jnp.all(result.param_history[:, 1] <= -0.5 + 1e-6)
+
+    def test_natural_gradient_vi_conjugate_gaussian(self):
+        """Natural-gradient VI on a conjugate Gaussian, kept feasible by projection.
+
+        Prior x ~ N(0, 1), likelihood y ~ N(x, 1), observe y = 2.
+        Posterior is N(mean=1.0, var=0.5), i.e. natural params eta = (2.0, -1.0).
+        The variational family is parameterized in natural coordinates, so the
+        REINFORCE gradient through ``normal_natural_reinforce`` IS the natural
+        gradient; the projection keeps eta[1] = -1/(2 var) strictly negative.
+        """
+        prior_std, lik_std, y = 1.0, 1.0, 2.0
+
+        @gen
+        def target():
+            x = normal(0.0, prior_std) @ "x"
+            normal(x, lik_std) @ "y"
+
+        @gen
+        def natural_family(constraint, params):
+            normal_natural_reinforce(params[0], params[1]) @ "x"
+
+        # Feasibility: eta[1] = -1/(2 sigma^2) must stay strictly negative.
+        def project(params):
+            return params.at[1].set(jnp.minimum(params[1], -1e-3))
+
+        # Init: mean 0, var 1  ->  eta = (0, -0.5).
+        init_params = jnp.array([0.0, -0.5])
+
+        def run_vi():
+            return elbo_vi(
+                target_gf=target,
+                variational_family=natural_family,
+                init_params=init_params,
+                constraint={"y": y},
+                learning_rate=1e-2,
+                n_iterations=3000,
+                project=project,
+            )
+
+        result = seed(run_vi)(jrand.key(0))
+
+        # Feasibility maintained for the whole trajectory.
+        assert jnp.all(jnp.isfinite(result.final_params))
+        assert jnp.all(result.param_history[:, 1] <= -1e-3 + 1e-6)
+
+        # Average the tail of the trajectory to reduce SGD noise, then convert
+        # natural params -> moments: var = -0.5/eta2, mean = eta1 * var.
+        tail = jnp.mean(result.param_history[-1000:], axis=0)
+        var = -0.5 / tail[1]
+        mean = tail[0] * var
+        assert jnp.abs(mean - 1.0) < 0.25  # posterior mean 1.0
+        assert jnp.abs(var - 0.5) < 0.25  # posterior var 0.5
 
 
 class TestRobustness:

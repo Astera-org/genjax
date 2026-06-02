@@ -95,6 +95,7 @@ def optimize_vi(
     learning_rate: float = 1e-3,
     n_iterations: int = 1000,
     track_history: bool = True,
+    project: Any = None,
 ) -> VariationalApproximation:
     """Optimize variational parameters using gradient ascent on ELBO.
 
@@ -104,6 +105,12 @@ def optimize_vi(
         learning_rate: Step size for gradient ascent.
         n_iterations: Number of optimization iterations
         track_history: Whether to track parameter and loss history
+        project: Optional feasibility projection ``params -> params`` applied
+            after each gradient-ascent step. Use this to keep parameters in
+            their feasible domain -- e.g. for natural-parameter (qBBVI)
+            families where the Normal's ``eta[1] = -1/(2 sigma^2)`` must stay
+            strictly negative. The projected value is what gets recorded in the
+            history and carried to the next step.
 
     Returns:
         VariationalApproximation with optimized parameters and diagnostics
@@ -117,6 +124,10 @@ def optimize_vi(
 
         # Gradient ascent step (maximizing ELBO)
         new_params = params + learning_rate * param_grad
+
+        # Project back into the feasible parameter domain, if requested.
+        if project is not None:
+            new_params = project(new_params)
 
         if track_history:
             return new_params, (new_params, 0.0)  # Placeholder loss for now
@@ -243,6 +254,7 @@ def elbo_vi(
     learning_rate: float = 1e-3,
     n_iterations: int = 1000,
     track_history: bool = True,
+    project: Any = None,
 ) -> VariationalApproximation:
     """
     Complete ELBO-based variational inference pipeline.
@@ -258,6 +270,9 @@ def elbo_vi(
         learning_rate: Step size for gradient ascent
         n_iterations: Number of optimization iterations
         track_history: Whether to track parameter and loss history
+        project: Optional feasibility projection ``params -> params`` applied
+            after each step (see ``optimize_vi``). Needed for natural-parameter
+            exponential families to keep parameters in their feasible domain.
 
     Returns:
         VariationalApproximation with optimized parameters and diagnostics
@@ -273,4 +288,5 @@ def elbo_vi(
         learning_rate=learning_rate,
         n_iterations=n_iterations,
         track_history=track_history,
+        project=project,
     )
