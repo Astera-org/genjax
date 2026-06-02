@@ -79,6 +79,26 @@ from .distributions import (  # noqa: E402
     negative_binomial,
     zipf,
 )
+from .natural import (  # noqa: E402
+    # Natural-gradient exponential-family distributions
+    bernoulli_natural,
+    flip_natural,
+    poisson_natural,
+    geometric_natural,
+    exponential_natural,
+    normal_natural,
+    beta_natural,
+    gamma_natural,
+    # Natural-gradient REINFORCE estimators
+    bernoulli_natural_reinforce,
+    flip_natural_reinforce,
+    poisson_natural_reinforce,
+    geometric_natural_reinforce,
+    exponential_natural_reinforce,
+    normal_natural_reinforce,
+    beta_natural_reinforce,
+    gamma_natural_reinforce,
+)
 from .inference import (  # noqa: E402
     # MCMC
     MCMCResult,
@@ -194,6 +214,24 @@ __all__ = [
     "multivariate_normal_diag_reparam",
     "multivariate_normal_reparam",
     "multivariate_normal_reinforce",
+    # Natural-gradient exponential-family distributions
+    "bernoulli_natural",
+    "flip_natural",
+    "poisson_natural",
+    "geometric_natural",
+    "exponential_natural",
+    "normal_natural",
+    "beta_natural",
+    "gamma_natural",
+    # Natural-gradient REINFORCE estimators
+    "bernoulli_natural_reinforce",
+    "flip_natural_reinforce",
+    "poisson_natural_reinforce",
+    "geometric_natural_reinforce",
+    "exponential_natural_reinforce",
+    "normal_natural_reinforce",
+    "beta_natural_reinforce",
+    "gamma_natural_reinforce",
     "seed",
     "sel",
     "Selection",
