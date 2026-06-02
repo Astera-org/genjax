@@ -4,10 +4,14 @@ name = "genjax"
 requires-python = ">= 3.12"
 version = "1.0.13"
 dependencies = [
-    "jax>=0.7.2",
-    "penzai>=0.2.5,<0.3",
     "beartype>=0.22.9,<0.23",
+    # efax 2.x requires jax>=0.9, which is not yet compatible with GenJAX's
+    # pjax/adev internals; pin to the 1.x line that supports jax>=0.4.34.
+    "efax>=1.20,<2",
+    "jax>=0.7.2",
     "jaxtyping>=0.3.9,<0.4",
+    "matplotlib>=3.10.3,<4",
+    "penzai>=0.2.5,<0.3",
     "tensorflow-probability>=0.25.0,<0.26",
 ]
 
@@ -25,6 +29,7 @@ matplotlib = ">=3.10.3,<4"
 
 [tool.pixi.pypi-dependencies]
 genjax = { path = ".", editable = true }
+efax = ">=1.20,<2"
 
 [tool.pixi.tasks]
 # Clean all generated figures from examples
