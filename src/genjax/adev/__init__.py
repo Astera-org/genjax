@@ -117,10 +117,15 @@ def _is_ad_zero(v) -> bool:
 def _is_float0_tangent(v) -> bool:
     """Whether ``v`` has float0 tangent dtype.
 
-    We use ``get_aval`` so this works for both concrete arrays and tracers.
+    We use ``jax.typeof`` so this works for both concrete arrays and tracers.
     """
     try:
-        aval = jax._src.core.get_aval(v)
+        # ``jax.core.get_aval`` is deprecated; prefer the public ``jax.typeof``
+        # when available, falling back for older JAX versions.
+        if hasattr(jax, "typeof"):
+            aval = jax.typeof(v)
+        else:
+            aval = jax._src.core.get_aval(v)
     except TypeError:
         return False
     return isinstance(aval, jax._src.core.ShapedArray) and aval.dtype == jax.dtypes.float0

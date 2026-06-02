@@ -131,6 +131,10 @@ VarOrLiteral = Var | Literal
 
 def get_shaped_aval(x):
     """Get the shaped abstract value of a JAX array."""
+    # ``jax.core.get_aval`` is deprecated; prefer the public ``jax.typeof`` when
+    # available, falling back for older JAX versions.
+    if hasattr(jax, "typeof"):
+        return jax.typeof(x)
     return jc.get_aval(x)
 
 
