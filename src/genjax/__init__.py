@@ -17,6 +17,9 @@ from .adev import (  # noqa: E402
     flip_enum,
     flip_enum_parallel,
     flip_mvd,
+    bernoulli_mvd,
+    poisson_mvd,
+    geometric_mvd,
     flip_reinforce,
     geometric_reinforce,
     normal_reinforce,
@@ -98,6 +101,11 @@ from .natural import (  # noqa: E402
     normal_natural_reinforce,
     beta_natural_reinforce,
     gamma_natural_reinforce,
+    # Natural-gradient measure-valued derivative estimators
+    bernoulli_natural_mvd,
+    flip_natural_mvd,
+    poisson_natural_mvd,
+    geometric_natural_mvd,
 )
 from .inference import (  # noqa: E402
     # MCMC
@@ -194,6 +202,9 @@ __all__ = [
     "flip_enum",
     "flip_enum_parallel",
     "flip_mvd",
+    "bernoulli_mvd",
+    "poisson_mvd",
+    "geometric_mvd",
     "flip_reinforce",
     "gen",
     "geometric_reinforce",
@@ -232,6 +243,10 @@ __all__ = [
     "normal_natural_reinforce",
     "beta_natural_reinforce",
     "gamma_natural_reinforce",
+    "bernoulli_natural_mvd",
+    "flip_natural_mvd",
+    "poisson_natural_mvd",
+    "geometric_natural_mvd",
     "seed",
     "sel",
     "Selection",

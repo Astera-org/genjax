@@ -64,9 +64,18 @@ from efax import (  # noqa: E402
     PoissonNP,
 )
 
-from genjax.core import distribution  # noqa: E402
+from genjax.core import distribution, Pytree  # noqa: E402
 from genjax.pjax import wrap_logpdf, wrap_sampler  # noqa: E402
-from genjax.adev import reinforce  # noqa: E402
+from genjax.adev import (  # noqa: E402
+    reinforce,
+    ADEVPrimitive,
+    Dual,
+    _discrete_zero_tangent,
+    _first_leaf,
+    _mvd_phantom_estimate,
+    _mvd_lane_estimate,
+    _flip_lane_rb_estimate,
+)
 
 
 def natural_gradient_logpdf(base_logpdf, n_params):
@@ -151,31 +160,49 @@ def _efax_keyful_sampler(np_ctor, cast):
     return keyful_sampler
 
 
-def _natural_distribution(np_ctor, n_params, name, cast=None):
+def _geometric_natural_keyful(key, eta, sample_shape=()):
+    """Reliable Geometric (failure-count) sampler in natural coords eta = log(1-p).
+
+    efax 1.20's ``GeometricNP.sample`` is degenerate for ``p >= 0.5`` (it returns
+    a constant), so we sample by inverse-CDF instead:
+    ``X = floor(log U / log(1-p))`` with ``U ~ Uniform(0, 1]`` yields
+    ``P(X=k) = (1-p)^k p`` (success probability ``p``). Here ``1-p = exp(eta)``,
+    so ``log(1-p) = eta`` directly.
+    """
+    shape = sample_shape if sample_shape else jnp.shape(eta)
+    # U in (0, 1]: 1 - Uniform[0, 1) avoids log(0).
+    u = 1.0 - jax.random.uniform(key, shape=shape)
+    return jnp.floor(jnp.log(u) / eta)
+
+
+def _natural_distribution(np_ctor, n_params, name, cast=None, keyful_sampler=None):
     """Build a Distribution in natural coordinates with a natural-gradient logpdf.
 
     Args:
         np_ctor: Callable ``(*eta) -> efax.NaturalParametrization`` mapping the
-            canonical natural parameters to an efax distribution (used for both
-            the density *value* and sampling).
+            canonical natural parameters to an efax distribution (used for the
+            density *value* and, by default, sampling).
         n_params: Number of (scalar) natural parameters.
         name: Display name.
         cast: Optional post-processing applied to samples (e.g. dtype cast).
+        keyful_sampler: Optional keyful sampler override (used where efax's
+            sampler is unreliable, e.g. Geometric).
     """
 
     def raw_logpdf(x, *eta):
         return np_ctor(*eta).log_pdf(x)
 
     nat_logpdf = natural_gradient_logpdf(raw_logpdf, n_params)
+    sampler = keyful_sampler or _efax_keyful_sampler(np_ctor, cast)
 
     return distribution(
-        wrap_sampler(_efax_keyful_sampler(np_ctor, cast), name=name),
+        wrap_sampler(sampler, name=name),
         wrap_logpdf(nat_logpdf, name=name),
         name=name,
     )
 
 
-def _natural_reinforce(nat_dist, np_ctor, cast=None):
+def _natural_reinforce(nat_dist, np_ctor, cast=None, keyful_sampler=None):
     """Build a REINFORCE estimator that uses the natural-gradient log-density.
 
     Because the score function in the REINFORCE identity is computed from
@@ -186,7 +213,7 @@ def _natural_reinforce(nat_dist, np_ctor, cast=None):
         reinforce(
             nat_dist.sample,
             nat_dist.logpdf,
-            _efax_keyful_sampler(np_ctor, cast),
+            keyful_sampler or _efax_keyful_sampler(np_ctor, cast),
         ),
         nat_dist.logpdf,
     )
@@ -265,15 +292,18 @@ geometric_natural = _natural_distribution(
     _geometric_ctor,
     1,
     name="GeometricNatural",
+    keyful_sampler=_geometric_natural_keyful,
 )
 """Geometric (efax ``GeometricNP``; number of failures, support {0, 1, 2, ...})
 in its natural parameter ``eta = log_not_p = log(1 - p)`` with ``eta < 0``.
 
-``T(x) = x``, ``mu = (1 - p) / p``, ``F = (1 - p) / p^2``.
+``T(x) = x``, ``mu = (1 - p) / p``, ``F = (1 - p) / p^2``. Sampling uses an
+inverse-CDF kernel (efax 1.20's geometric sampler is degenerate for p >= 0.5);
+the density still comes from efax.
 """
 
 geometric_natural_reinforce = _natural_reinforce(
-    geometric_natural, _geometric_ctor
+    geometric_natural, _geometric_ctor, keyful_sampler=_geometric_natural_keyful
 )
 """Natural-gradient REINFORCE estimator for ``geometric_natural``."""
 
@@ -368,6 +398,193 @@ gamma_natural_reinforce = _natural_reinforce(gamma_natural, _gamma_ctor)
 """Natural-gradient REINFORCE estimator for ``gamma_natural``."""
 
 
+# ----------------------------------------------------------------------------
+# Measure-valued derivative (MVD) estimators in natural coordinates.
+#
+# These return the *natural gradient* w.r.t. the natural parameter eta -- i.e.
+# the ordinary gradient w.r.t. the mean parameter mu, F(eta)^{-1} d/deta = d/dmu
+# -- so they are drop-in natural-gradient siblings of the ``*_natural_reinforce``
+# estimators. Sampling uses the efax-backed natural Distributions (correct under
+# ``seed``). The mean-parameter MVD decompositions are:
+#
+#   Bernoulli (mu = p)        : d/dmu E[f] = f(1) - f(0)              (exact)
+#   Poisson   (mu = rate)     : d/dmu E[f] = E[f(X+1)] - E[f(X)]
+#   Geometric (mu = E[X])     : d/dmu E[f] = p (f(G1+G2+1) - f(X))    (c = p)
+#
+# (For Bernoulli/Poisson the natural gradient coincides with the typical-param
+# gradient, since there the typical parameter already equals the mean parameter;
+# Geometric differs.)
+# ----------------------------------------------------------------------------
+
+
+@Pytree.dataclass
+class BernoulliNaturalMVD(ADEVPrimitive):
+    """Natural-gradient MVD for Bernoulli in natural coordinate ``eta = logit(p)``.
+
+    Since the mean parameter is ``mu = p``, the natural gradient is the exact
+    Bernoulli MVD ``f(1) - f(0)``.
+    """
+
+    def sample(self, *args):
+        (eta,) = args
+        return bernoulli_natural.sample(eta)
+
+    def sample_with_key(self, key, *args, sample_shape=()):
+        (eta,) = args
+        return _efax_keyful_sampler(_bernoulli_ctor, _to_int)(
+            key, eta, sample_shape=sample_shape
+        )
+
+    def prim_jvp_estimate(self, dual_tree, konts):
+        (kpure, kdual) = konts
+        (eta_primal,) = Dual.tree_primal(dual_tree)
+        (eta_tangent,) = Dual.tree_tangent(dual_tree)
+
+        # Natural gradient = f(1) - f(0); contract directly with eta_tangent
+        # (no p(1-p) factor -- that is exactly the F^{-1} preconditioning).
+        if jnp.ndim(eta_primal) > 0:
+            p = jax.nn.sigmoid(eta_primal)
+            return _flip_lane_rb_estimate(kpure, kdual, p, eta_tangent)
+
+        b = bernoulli_natural.sample(eta_primal)
+        b_dual = kdual(Dual(b, _discrete_zero_tangent(b)))
+        (b_primal,), (b_tangent,) = Dual.tree_unzip(b_dual)
+        other = _first_leaf(kpure(1 - b))
+        sign = jnp.where(b > 0, -1.0, 1.0).astype(b_primal.dtype)
+        diff = sign * (other - b_primal)  # f(1) - f(0)
+        return Dual(b_primal, b_tangent + diff * eta_tangent)
+
+
+bernoulli_natural_mvd = BernoulliNaturalMVD()
+"""Natural-gradient MVD estimator for ``bernoulli_natural`` (eta = logit(p))."""
+
+
+@Pytree.dataclass
+class FlipNaturalMVD(ADEVPrimitive):
+    """Boolean-valued natural-gradient MVD for Bernoulli (eta = logit(p))."""
+
+    def sample(self, *args):
+        (eta,) = args
+        return flip_natural.sample(eta)
+
+    def sample_with_key(self, key, *args, sample_shape=()):
+        (eta,) = args
+        return _efax_keyful_sampler(_bernoulli_ctor, None)(
+            key, eta, sample_shape=sample_shape
+        )
+
+    def prim_jvp_estimate(self, dual_tree, konts):
+        (kpure, kdual) = konts
+        (eta_primal,) = Dual.tree_primal(dual_tree)
+        (eta_tangent,) = Dual.tree_tangent(dual_tree)
+
+        if jnp.ndim(eta_primal) > 0:
+            p = jax.nn.sigmoid(eta_primal)
+            return _flip_lane_rb_estimate(kpure, kdual, p, eta_tangent)
+
+        b = flip_natural.sample(eta_primal)
+        b_dual = kdual(Dual(b, _discrete_zero_tangent(b)))
+        (b_primal,), (b_tangent,) = Dual.tree_unzip(b_dual)
+        other = _first_leaf(kpure(jnp.logical_not(b)))
+        sign = jnp.where(b, -1.0, 1.0).astype(b_primal.dtype)
+        diff = sign * (other - b_primal)  # f(1) - f(0)
+        return Dual(b_primal, b_tangent + diff * eta_tangent)
+
+
+flip_natural_mvd = FlipNaturalMVD()
+"""Boolean-valued natural-gradient MVD estimator for ``flip_natural``."""
+
+
+@Pytree.dataclass
+class PoissonNaturalMVD(ADEVPrimitive):
+    """Natural-gradient MVD for Poisson in natural coordinate ``eta = log(rate)``.
+
+    Since ``mu = rate``, the natural gradient is the coupled Poisson MVD
+    ``f(X+1) - f(X)`` with ``X ~ Poisson(rate)``.
+    """
+
+    def sample(self, *args):
+        (eta,) = args
+        return poisson_natural.sample(eta)
+
+    def sample_with_key(self, key, *args, sample_shape=()):
+        (eta,) = args
+        return _efax_keyful_sampler(_poisson_ctor, None)(
+            key, eta, sample_shape=sample_shape
+        )
+
+    def prim_jvp_estimate(self, dual_tree, konts):
+        (eta_primal,) = Dual.tree_primal(dual_tree)
+        (eta_tangent,) = Dual.tree_tangent(dual_tree)
+
+        x = poisson_natural.sample(eta_primal)
+        if jnp.ndim(eta_primal) > 0:
+            (_, kdual) = konts
+            return _mvd_lane_estimate(
+                kdual,
+                x,
+                lambda i, x_flat: x_flat.at[i].add(1),
+                1.0,
+                eta_tangent,
+                primal_is_positive=False,
+            )
+        return _mvd_phantom_estimate(
+            konts, x, x + 1, 1.0, eta_tangent, primal_is_positive=False
+        )
+
+
+poisson_natural_mvd = PoissonNaturalMVD()
+"""Natural-gradient MVD estimator for ``poisson_natural`` (eta = log(rate))."""
+
+
+@Pytree.dataclass
+class GeometricNaturalMVD(ADEVPrimitive):
+    """Natural-gradient MVD for Geometric in natural coordinate ``eta = log(1-p)``.
+
+    The mean parameter is ``mu = E[X] = (1-p)/p``; the natural gradient is
+    ``p (f(G1+G2+1) - f(X))`` with ``X, G1, G2 ~ Geometric(p)`` and
+    ``p = 1 - exp(eta)``.
+    """
+
+    def sample(self, *args):
+        (eta,) = args
+        return geometric_natural.sample(eta)
+
+    def sample_with_key(self, key, *args, sample_shape=()):
+        (eta,) = args
+        return _geometric_natural_keyful(key, eta, sample_shape=sample_shape)
+
+    def prim_jvp_estimate(self, dual_tree, konts):
+        (eta_primal,) = Dual.tree_primal(dual_tree)
+        (eta_tangent,) = Dual.tree_tangent(dual_tree)
+
+        x = geometric_natural.sample(eta_primal)
+        g1 = geometric_natural.sample(eta_primal)
+        g2 = geometric_natural.sample(eta_primal)
+        phantom = g1 + g2 + 1.0
+        p = 1.0 - jnp.exp(eta_primal)  # eta = log(1 - p)
+
+        if jnp.ndim(eta_primal) > 0:
+            (_, kdual) = konts
+            phantom_flat = jnp.reshape(phantom, (-1,))
+            return _mvd_lane_estimate(
+                kdual,
+                x,
+                lambda i, x_flat: x_flat.at[i].set(phantom_flat[i]),
+                p,
+                eta_tangent,
+                primal_is_positive=False,
+            )
+        # mu-space positive component is the size-biased draw G1+G2+1.
+        return _mvd_phantom_estimate(
+            konts, x, phantom, p, eta_tangent, primal_is_positive=False
+        )
+
+
+geometric_natural_mvd = GeometricNaturalMVD()
+"""Natural-gradient MVD estimator for ``geometric_natural`` (eta = log(1-p))."""
+
+
 __all__ = [
     "natural_gradient_logpdf",
     "bernoulli_natural",
@@ -386,4 +603,8 @@ __all__ = [
     "normal_natural_reinforce",
     "beta_natural_reinforce",
     "gamma_natural_reinforce",
+    "bernoulli_natural_mvd",
+    "flip_natural_mvd",
+    "poisson_natural_mvd",
+    "geometric_natural_mvd",
 ]

@@ -84,16 +84,18 @@ from jax.extend.core import Jaxpr, Var, jaxpr_as_fun
 from jax.interpreters import ad as jax_autodiff
 from jaxtyping import ArrayLike
 
-from genjax._compat import ensure_jax_tfp_compat
+from genjax._compat import ensure_jax_tfp_compat, suppress_tfp_dtype_warning
 
 ensure_jax_tfp_compat()
 from tensorflow_probability.substrates import jax as tfp
 
 from genjax.distributions import (
+    bernoulli,
     categorical,
     flip,
     geometric,
     normal,
+    poisson,
     uniform,
     multivariate_normal,
 )
@@ -1493,6 +1495,239 @@ def _uniform_keyful_sample(key, low, high, sample_shape=()):
     return tfd.Uniform(low, high).sample(seed=key, sample_shape=sample_shape)
 
 
+def _poisson_keyful_sample(key, rate, sample_shape=()):
+    # Mirror tfp_distribution's sampler: silence TFP's benign float64-truncation
+    # UserWarning so a consumer's ``error::UserWarning`` filter does not escalate.
+    with suppress_tfp_dtype_warning():
+        return tfd.Poisson(rate=rate).sample(seed=key, sample_shape=sample_shape)
+
+
+############################################################
+# Measure-valued derivative (MVD) estimators for discrete  #
+# minimal exponential families.                            #
+############################################################
+#
+# An MVD estimator writes the parameter derivative of an expectation as a
+# (scaled) difference of two expectations,
+#
+#     d/dtheta E_p(x;theta)[f(x)] = c(theta) (E_{p+}[f] - E_{p-}[f]),
+#
+# and estimates it by sampling the positive/negative component distributions
+# p+/p-. For the discrete minimal exponential families the decompositions are:
+#
+#   Bernoulli(p)  :  d/dp E[f] = f(1) - f(0)              (exact; c = 1)
+#   Poisson(rate) :  d/drate E[f] = E[f(X+1)] - E[f(X)]   (c = 1, X ~ Poisson)
+#   Geometric(p)  :  d/dp E[f] = (1/p)(f(X) - f(G1+G2+1)) (X,G1,G2 ~ Geometric)
+#
+# (Geometric is the failure-count convention, support {0,1,2,...}; the negative
+# component is the size-biased geometric, equal in law to G1+G2+1.)
+#
+# We follow ``FlipMVD``: the *primal* sample is drawn from p(theta) so the
+# forward value is an unbiased sample of E[f], the continuation ``kdual``
+# carries it (and the downstream tangent), and a phantom evaluation of the
+# remaining computation supplies the gradient. Scalar sites use ``kpure`` on a
+# single phantom point; batched sites use a lane-wise Rao-Blackwellized variant
+# (mirroring ``_flip_lane_rb_estimate``) to avoid exponential enumeration.
+
+
+def _mvd_phantom_estimate(
+    konts, primal_sample, phantom_value, coeff, param_tangent, primal_is_positive
+):
+    """Scalar MVD phantom estimator.
+
+    ``primal_sample`` is carried through ``kdual`` (forward value + downstream
+    tangent); ``phantom_value`` is the opposite MVD component, evaluated with
+    ``kpure``. The gradient contribution is
+    ``coeff * (f(primal) - f(phantom)) * param_tangent`` when the primal is the
+    positive component, and the negated difference otherwise.
+    """
+    (kpure, kdual) = konts
+    x_dual = kdual(Dual(primal_sample, _discrete_zero_tangent(primal_sample)))
+    (x_primal,), (x_tangent,) = Dual.tree_unzip(x_dual)
+
+    f_phantom = _first_leaf(kpure(phantom_value))
+    diff = (x_primal - f_phantom) if primal_is_positive else (f_phantom - x_primal)
+    return Dual(x_primal, x_tangent + coeff * diff * param_tangent)
+
+
+def _mvd_lane_estimate(
+    kdual, primal_samples, perturb, coeff, param_tangent, primal_is_positive
+):
+    """Lane-wise Rao-Blackwellized MVD for batched discrete sites.
+
+    For each lane ``i`` we replace that lane's value by its phantom component
+    (via ``perturb(i, x_flat) -> x_flat'``), re-evaluate the continuation, and
+    accumulate ``coeff_i * (+/-)(f(x) - f(x')) * param_tangent_i``. All
+    continuation evaluations go through ``kdual`` (primal part only) so the
+    estimator stays consistent with the dual downstream semantics.
+    """
+    x = primal_samples
+    x_dual = kdual(Dual(x, _discrete_zero_tangent(x)))
+    (x_primal,), (x_tangent,) = Dual.tree_unzip(x_dual)
+
+    def cont_primal(sample):
+        out_dual = kdual(Dual(sample, _discrete_zero_tangent(sample)))
+        (out_primal,), _ = Dual.tree_unzip(out_dual)
+        return out_primal
+
+    x_flat = jnp.reshape(x, (-1,))
+    t_flat = jnp.reshape(jnp.broadcast_to(param_tangent, jnp.shape(x)), (-1,))
+    c_flat = jnp.reshape(jnp.broadcast_to(coeff, jnp.shape(x)), (-1,))
+
+    est = jnp.zeros_like(x_primal)
+    num_lanes = int(x_flat.shape[0])
+    for i in range(num_lanes):
+        perturbed = jnp.reshape(perturb(i, x_flat), jnp.shape(x))
+        other = cont_primal(perturbed)
+        diff = (x_primal - other) if primal_is_positive else (other - x_primal)
+        est = est + c_flat[i] * diff * t_flat[i]
+
+    return Dual(x_primal, x_tangent + est)
+
+
+@Pytree.dataclass
+class PoissonMVD(ADEVPrimitive):
+    """Measure-valued derivative estimator for Poisson in the rate parameter.
+
+    Uses the coupled decomposition ``d/drate E[f] = E[f(X+1)] - E[f(X)]`` with
+    ``X ~ Poisson(rate)``: the primal sample ``X`` is the negative component and
+    its shift ``X+1`` is the positive component, so ``c = 1``.
+    """
+
+    def sample(self, *args):
+        (rate,) = args
+        return poisson.sample(rate)
+
+    def sample_with_key(self, key, *args, sample_shape=()):
+        (rate,) = args
+        return _poisson_keyful_sample(key, rate, sample_shape=sample_shape)
+
+    def prim_jvp_estimate(self, dual_tree, konts):
+        (rate_primal,) = Dual.tree_primal(dual_tree)
+        (rate_tangent,) = Dual.tree_tangent(dual_tree)
+
+        x = poisson.sample(rate_primal)
+        if jnp.ndim(rate_primal) > 0:
+            (_, kdual) = konts
+            return _mvd_lane_estimate(
+                kdual,
+                x,
+                lambda i, x_flat: x_flat.at[i].add(1),
+                1.0,
+                rate_tangent,
+                primal_is_positive=False,
+            )
+        # Scalar: phantom point is X + 1 (the positive component).
+        return _mvd_phantom_estimate(
+            konts, x, x + 1, 1.0, rate_tangent, primal_is_positive=False
+        )
+
+
+poisson_mvd = PoissonMVD()
+
+
+@Pytree.dataclass
+class GeometricMVD(ADEVPrimitive):
+    """Measure-valued derivative estimator for Geometric in the *logits* parameter.
+
+    Matches genjax's ``geometric`` distribution, which is parameterized by
+    ``logits`` (success probability ``p = sigmoid(logits)``; failure-count
+    convention). The probs-space decomposition ``d/dp E[f] = (1/p)(f(X) -
+    f(G1+G2+1))`` (with ``X, G1, G2 ~ Geometric(p)``; the negative component is
+    the size-biased geometric) maps through ``dp/dlogits = p(1-p)`` to
+
+        d/dlogits E[f] = (1 - p) (f(X) - f(G1+G2+1)),  c = 1 - p.
+    """
+
+    def sample(self, *args):
+        (logits,) = args
+        return geometric.sample(logits)
+
+    def sample_with_key(self, key, *args, sample_shape=()):
+        (logits,) = args
+        return tfd.Geometric(logits=logits).sample(
+            seed=key, sample_shape=sample_shape
+        )
+
+    def prim_jvp_estimate(self, dual_tree, konts):
+        (logits_primal,) = Dual.tree_primal(dual_tree)
+        (logits_tangent,) = Dual.tree_tangent(dual_tree)
+
+        x = geometric.sample(logits_primal)
+        g1 = geometric.sample(logits_primal)
+        g2 = geometric.sample(logits_primal)
+        phantom = g1 + g2 + 1.0
+        coeff = 1.0 - jax.nn.sigmoid(logits_primal)  # 1 - p
+
+        if jnp.ndim(logits_primal) > 0:
+            (_, kdual) = konts
+            phantom_flat = jnp.reshape(phantom, (-1,))
+            return _mvd_lane_estimate(
+                kdual,
+                x,
+                lambda i, x_flat: x_flat.at[i].set(phantom_flat[i]),
+                coeff,
+                logits_tangent,
+                primal_is_positive=True,
+            )
+        # Scalar: phantom point is the size-biased draw G1 + G2 + 1.
+        return _mvd_phantom_estimate(
+            konts, x, phantom, coeff, logits_tangent, primal_is_positive=True
+        )
+
+
+geometric_mvd = GeometricMVD()
+
+
+@Pytree.dataclass
+class BernoulliMVD(ADEVPrimitive):
+    """Measure-valued derivative estimator for Bernoulli in the *logits* parameter.
+
+    Integer-valued companion of ``flip_mvd`` (which is parameterized by probs).
+    Matches genjax's ``bernoulli`` distribution, parameterized by ``logits``
+    (``p = sigmoid(logits)``). The exact probs-space MVD ``d/dp E[f] = f(1) -
+    f(0)`` maps through ``dp/dlogits = p(1-p)`` to
+
+        d/dlogits E[f] = p(1 - p) (f(1) - f(0)).
+    """
+
+    def sample(self, *args):
+        (logits,) = args
+        return bernoulli.sample(logits)
+
+    def sample_with_key(self, key, *args, sample_shape=()):
+        (logits,) = args
+        return tfd.Bernoulli(logits=logits, dtype=jnp.int32).sample(
+            seed=key, sample_shape=sample_shape
+        )
+
+    def prim_jvp_estimate(self, dual_tree, konts):
+        (kpure, kdual) = konts
+        (logits_primal,) = Dual.tree_primal(dual_tree)
+        (logits_tangent,) = Dual.tree_tangent(dual_tree)
+
+        p = jax.nn.sigmoid(logits_primal)
+        # The lane-wise / scalar phantom difference yields f(1) - f(0); the
+        # chain-rule factor p(1-p) converts the probs gradient to the logits
+        # gradient, folded into the tangent we pass through.
+        if jnp.ndim(logits_primal) > 0:
+            return _flip_lane_rb_estimate(
+                kpure, kdual, p, p * (1.0 - p) * logits_tangent
+            )
+
+        # Scalar: f(1) - f(0), scaled by p(1-p).
+        b = bernoulli.sample(logits_primal)
+        b_dual = kdual(Dual(b, _discrete_zero_tangent(b)))
+        (b_primal,), (b_tangent,) = Dual.tree_unzip(b_dual)
+        other = _first_leaf(kpure(1 - b))
+        sign = jnp.where(b > 0, -1.0, 1.0).astype(b_primal.dtype)
+        diff = sign * (other - b_primal)  # = f(1) - f(0)
+        return Dual(b_primal, b_tangent + p * (1.0 - p) * diff * logits_tangent)
+
+
+bernoulli_mvd = BernoulliMVD()
+
+
 flip_reinforce = distribution(
     reinforce(
         flip.sample,
@@ -1837,6 +2072,9 @@ __all__ = [
     "flip_enum",
     "flip_enum_parallel",
     "flip_mvd",
+    "bernoulli_mvd",
+    "poisson_mvd",
+    "geometric_mvd",
     "categorical_enum_parallel",
     # Continuous gradient estimators (distributions)
     "flip_reinforce",
