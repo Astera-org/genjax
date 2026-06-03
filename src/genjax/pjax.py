@@ -736,6 +736,22 @@ global_counter = GlobalKeyCounter()
 _fake_key = jrand.key(1)
 
 
+def _ensure_typed_key(key):
+    """Normalize a PRNG key to a typed (``key<...>``-dtype) array.
+
+    The flat keyful samplers are staged with ``_fake_key`` -- a *typed* key --
+    so any ``random_split`` primitive baked into a TFP sampler's jaxpr (e.g.
+    ``Poisson``) expects a typed key at eval time. A raw ``uint32[..., 2]`` key
+    (from ``jax.random.PRNGKey``) would crash ``random_split_impl`` with
+    ``'ArrayImpl' object has no attribute '_impl'``. Wrapping a raw key with
+    ``wrap_key_data`` is bit-for-bit equivalent to using it directly, so this
+    only changes the dtype, not the stream.
+    """
+    if jnp.issubdtype(jnp.result_type(key), jax.dtypes.prng_key):
+        return key
+    return jrand.wrap_key_data(key)
+
+
 ##########################################################
 # Refactored Sample Binding: Separation of Concerns    #
 ##########################################################
@@ -1449,7 +1465,7 @@ def seed(
 
     @wraps(f)
     def wrapped(key: PRNGKey, *args, **kwargs):
-        interpreter = Seed(key)
+        interpreter = Seed(_ensure_typed_key(key))
         return interpreter.eval(
             f,
             *args,

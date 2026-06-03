@@ -11,7 +11,7 @@ import penzai.pz as pz
 from jax.lax import scan
 from typing_extensions import dataclass_transform
 
-from ._compat import ensure_jax_tfp_compat
+from ._compat import ensure_jax_tfp_compat, suppress_tfp_dtype_warning
 
 ensure_jax_tfp_compat()
 from tensorflow_probability.substrates import jax as tfp
@@ -1747,7 +1747,8 @@ def tfp_distribution(
 
     def keyful_sampler(key, *args, sample_shape=(), **kwargs):
         d = dist(*args, **kwargs)
-        return d.sample(seed=key, sample_shape=sample_shape)
+        with suppress_tfp_dtype_warning():
+            return d.sample(seed=key, sample_shape=sample_shape)
 
     def logpdf(v, *args, **kwargs):
         d = dist(*args, **kwargs)
