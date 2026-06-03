@@ -5,14 +5,21 @@ requires-python = ">= 3.12"
 version = "1.0.13"
 dependencies = [
     "beartype>=0.22.9,<0.23",
+    "coverage>=7.0,<8",
     # efax 2.x requires jax>=0.9, which is not yet compatible with GenJAX's
     # pjax/adev internals; pin to the 1.x line that supports jax>=0.4.34.
     "efax>=1.20,<2",
-    "jax>=0.7.2",
+    "jax>=0.7.2,<0.8; platform_system != 'Linux'",
+    "jax[cuda]>=0.7.2,<0.8; platform_system == 'Linux'",
     "jaxtyping>=0.3.9,<0.4",
     "matplotlib>=3.10.3,<4",
     "penzai>=0.2.5,<0.3",
-    "tensorflow-probability>=0.25.0,<0.26",
+    "pytest>=9.0,<10",
+    "pytest-cov>=7.0,<8",
+    "pytest-xdist>=3.0,<4",
+    "pytest-benchmark>=5.0,<6",
+    "xdoctest>=1.1.0,<2",
+    "tfp-nightly[jax]>=0.26.0.dev20260602",
 ]
 
 [build-system]
