@@ -455,8 +455,16 @@ class BernoulliNaturalMVD(ADEVPrimitive):
         return Dual(b_primal, b_tangent + diff * eta_tangent)
 
 
-bernoulli_natural_mvd = BernoulliNaturalMVD()
-"""Natural-gradient MVD estimator for ``bernoulli_natural`` (eta = logit(p))."""
+bernoulli_natural_mvd = distribution(
+    BernoulliNaturalMVD(),
+    bernoulli_natural.logpdf,
+    name="BernoulliNaturalMVD",
+)
+"""Natural-gradient MVD estimator for ``bernoulli_natural`` (eta = logit(p)).
+
+Wrapped as a :class:`~genjax.core.Distribution` so it can be addressed inside a
+generative function (``bernoulli_natural_mvd(eta) @ "z"``) as well as sampled
+directly inside an ``@expectation`` program."""
 
 
 @Pytree.dataclass
@@ -491,8 +499,14 @@ class FlipNaturalMVD(ADEVPrimitive):
         return Dual(b_primal, b_tangent + diff * eta_tangent)
 
 
-flip_natural_mvd = FlipNaturalMVD()
-"""Boolean-valued natural-gradient MVD estimator for ``flip_natural``."""
+flip_natural_mvd = distribution(
+    FlipNaturalMVD(),
+    flip_natural.logpdf,
+    name="FlipNaturalMVD",
+)
+"""Boolean-valued natural-gradient MVD estimator for ``flip_natural``.
+
+Wrapped as a :class:`~genjax.core.Distribution` (addressable via ``@``)."""
 
 
 @Pytree.dataclass
@@ -533,8 +547,14 @@ class PoissonNaturalMVD(ADEVPrimitive):
         )
 
 
-poisson_natural_mvd = PoissonNaturalMVD()
-"""Natural-gradient MVD estimator for ``poisson_natural`` (eta = log(rate))."""
+poisson_natural_mvd = distribution(
+    PoissonNaturalMVD(),
+    poisson_natural.logpdf,
+    name="PoissonNaturalMVD",
+)
+"""Natural-gradient MVD estimator for ``poisson_natural`` (eta = log(rate)).
+
+Wrapped as a :class:`~genjax.core.Distribution` (addressable via ``@``)."""
 
 
 @Pytree.dataclass
@@ -581,8 +601,14 @@ class GeometricNaturalMVD(ADEVPrimitive):
         )
 
 
-geometric_natural_mvd = GeometricNaturalMVD()
-"""Natural-gradient MVD estimator for ``geometric_natural`` (eta = log(1-p))."""
+geometric_natural_mvd = distribution(
+    GeometricNaturalMVD(),
+    geometric_natural.logpdf,
+    name="GeometricNaturalMVD",
+)
+"""Natural-gradient MVD estimator for ``geometric_natural`` (eta = log(1-p)).
+
+Wrapped as a :class:`~genjax.core.Distribution` (addressable via ``@``)."""
 
 
 __all__ = [

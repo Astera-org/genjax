@@ -18,7 +18,7 @@ from genjax.adev import (
     multivariate_normal_reparam,
 )
 from genjax.distributions import normal
-from genjax.natural import normal_natural_reinforce
+from genjax.adev.natural import normal_natural_reinforce
 from genjax.inference import (
     VariationalApproximation,
     elbo_factory,

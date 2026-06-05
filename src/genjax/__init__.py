@@ -82,7 +82,7 @@ from .distributions import (  # noqa: E402
     negative_binomial,
     zipf,
 )
-from .natural import (  # noqa: E402
+from .adev.natural import (  # noqa: E402
     # Natural-gradient exponential-family distributions
     bernoulli_natural,
     flip_natural,

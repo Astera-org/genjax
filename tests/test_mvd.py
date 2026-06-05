@@ -25,7 +25,7 @@ from genjax.adev import (
     poisson_mvd,
     geometric_mvd,
 )
-from genjax.natural import (
+from genjax.adev.natural import (
     bernoulli_natural_mvd,
     flip_natural_mvd,
     poisson_natural_mvd,

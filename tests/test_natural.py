@@ -1,6 +1,6 @@
 """Tests for natural-gradient exponential-family distribution variants.
 
-These validate the distributions in ``genjax.natural``:
+These validate the distributions in ``genjax.adev.natural``:
 - Their log-density *value* matches the underlying TFP distribution.
 - Differentiating the log-density w.r.t. the natural parameters ``eta`` returns
   the *natural* gradient ``F(eta)^{-1} (T(x) - mu) = grad_mu log p`` -- checked
@@ -16,7 +16,7 @@ import pytest
 import tensorflow_probability.substrates.jax as tfp
 
 from genjax.pjax import seed
-from genjax.natural import (
+from genjax.adev.natural import (
     bernoulli_natural,
     flip_natural,
     poisson_natural,
