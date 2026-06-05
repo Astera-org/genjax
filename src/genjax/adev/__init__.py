@@ -1387,7 +1387,12 @@ class FlipMVD(ADEVPrimitive):
         return Dual(b_primal, b_tangent + est * p_tangent)
 
 
-flip_mvd = FlipMVD()
+flip_mvd = distribution(FlipMVD(), flip.logpdf, name="FlipMVD")
+"""Measure-valued derivative estimator for ``flip`` (probs-parameterized).
+
+Wrapped as a :class:`~genjax.core.Distribution` so it is addressable inside a
+generative function (``flip_mvd(p) @ "z"``) and still samples directly inside an
+``@expectation`` program."""
 
 
 @Pytree.dataclass
@@ -1623,7 +1628,10 @@ class PoissonMVD(ADEVPrimitive):
         )
 
 
-poisson_mvd = PoissonMVD()
+poisson_mvd = distribution(PoissonMVD(), poisson.logpdf, name="PoissonMVD")
+"""Measure-valued derivative estimator for ``poisson`` (rate-parameterized).
+
+Wrapped as a :class:`~genjax.core.Distribution` (addressable via ``@``)."""
 
 
 @Pytree.dataclass
@@ -1676,7 +1684,10 @@ class GeometricMVD(ADEVPrimitive):
         )
 
 
-geometric_mvd = GeometricMVD()
+geometric_mvd = distribution(GeometricMVD(), geometric.logpdf, name="GeometricMVD")
+"""Measure-valued derivative estimator for ``geometric`` (logits-parameterized).
+
+Wrapped as a :class:`~genjax.core.Distribution` (addressable via ``@``)."""
 
 
 @Pytree.dataclass
@@ -1725,7 +1736,10 @@ class BernoulliMVD(ADEVPrimitive):
         return Dual(b_primal, b_tangent + p * (1.0 - p) * diff * logits_tangent)
 
 
-bernoulli_mvd = BernoulliMVD()
+bernoulli_mvd = distribution(BernoulliMVD(), bernoulli.logpdf, name="BernoulliMVD")
+"""Measure-valued derivative estimator for ``bernoulli`` (logits-parameterized).
+
+Wrapped as a :class:`~genjax.core.Distribution` (addressable via ``@``)."""
 
 
 flip_reinforce = distribution(

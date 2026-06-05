@@ -34,9 +34,10 @@ VALID_ESTIMATORS: tuple[EstimatorName, ...] = (
 )
 
 # Wrapping ADEV discrete primitives as GenJAX distributions enables
-# addressable `@ "site"` usage inside `@gen` programs.
+# addressable `@ "site"` usage inside `@gen` programs. `flip_mvd` is already a
+# `Distribution` (it ships pre-wrapped), so it only needs an alias here.
 flip_enum_dist = distribution(flip_enum, flip.logpdf)
-flip_mvd_dist = distribution(flip_mvd, flip.logpdf)
+flip_mvd_dist = flip_mvd
 
 
 @dataclass(frozen=True)

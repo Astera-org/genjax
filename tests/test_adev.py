@@ -328,11 +328,9 @@ class TestADEVVmapSemantics:
         `convert_element_type` JVP constant-folding.
         """
 
-        flip_mvd_dist = distribution(flip_mvd, flip.logpdf)
-
         @gen
         def model(p):
-            b = flip_mvd_dist(p) @ "b"
+            b = flip_mvd(p) @ "b"
             x = b.astype(jnp.float32)
             _ = multivariate_normal_reparam(
                 jnp.array([x, 0.0], dtype=jnp.float32),
